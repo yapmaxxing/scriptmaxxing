@@ -20086,6 +20086,95 @@
           validFor: Identifier
       };
   }
+  function pathFor(read, member, name) {
+      var _a;
+      let path = [];
+      for (;;) {
+          let obj = member.firstChild, prop;
+          if ((obj === null || obj === void 0 ? void 0 : obj.name) == "VariableName") {
+              path.push(read(obj));
+              return { path: path.reverse(), name };
+          }
+          else if ((obj === null || obj === void 0 ? void 0 : obj.name) == "MemberExpression" && ((_a = (prop = obj.lastChild)) === null || _a === void 0 ? void 0 : _a.name) == "PropertyName") {
+              path.push(read(prop));
+              member = obj;
+          }
+          else {
+              return null;
+          }
+      }
+  }
+  function completionPath(context) {
+      let read = (node) => context.state.doc.sliceString(node.from, node.to);
+      let inner = syntaxTree(context.state).resolveInner(context.pos, -1);
+      if (inner.name == "PropertyName") {
+          return pathFor(read, inner.parent, read(inner));
+      }
+      else if ((inner.name == "." || inner.name == "?.") && inner.parent.name == "MemberExpression") {
+          return pathFor(read, inner.parent, "");
+      }
+      else if (dontComplete.indexOf(inner.name) > -1) {
+          return null;
+      }
+      else if (inner.name == "VariableName" || inner.to - inner.from < 20 && Identifier.test(read(inner))) {
+          return { path: [], name: read(inner) };
+      }
+      else if (inner.name == "MemberExpression") {
+          return pathFor(read, inner, "");
+      }
+      else {
+          return context.explicit ? { path: [], name: "" } : null;
+      }
+  }
+  function enumeratePropertyCompletions(obj, top) {
+      let options = [], seen = new Set;
+      for (let depth = 0;; depth++) {
+          for (let name of (Object.getOwnPropertyNames || Object.keys)(obj)) {
+              if (!/^[a-zA-Z_$\xaa-\uffdc][\w$\xaa-\uffdc]*$/.test(name) || seen.has(name))
+                  continue;
+              seen.add(name);
+              let value;
+              try {
+                  value = obj[name];
+              }
+              catch (_) {
+                  continue;
+              }
+              options.push({
+                  label: name,
+                  type: typeof value == "function" ? (/^[A-Z]/.test(name) ? "class" : top ? "function" : "method")
+                      : top ? "variable" : "property",
+                  boost: -depth
+              });
+          }
+          let next = Object.getPrototypeOf(obj);
+          if (!next)
+              return options;
+          obj = next;
+      }
+  }
+  function scopeCompletionSource(scope) {
+      let cache = new Map;
+      return (context) => {
+          let path = completionPath(context);
+          if (!path)
+              return null;
+          let target = scope;
+          for (let step of path.path) {
+              target = target[step];
+              if (!target)
+                  return null;
+          }
+          let options = cache.get(target);
+          if (!options)
+              cache.set(target, options = enumeratePropertyCompletions(target, !path.path.length));
+          return {
+              from: context.pos - path.name.length,
+              options,
+              validFor: Identifier
+          };
+      };
+  }
   const javascriptLanguage = LRLanguage.define({
       name: "javascript",
       parser: parser.configure({
@@ -20214,6 +20303,68 @@
           state.update(closeTags, { userEvent: "input.complete", scrollIntoView: true })
       ]);
       return true;
+  });
+  function esLint(eslint, config) {
+      if (!config) {
+          config = {
+              parserOptions: { ecmaVersion: 2019, sourceType: "module" },
+              env: { browser: true, node: true, es6: true, es2015: true, es2017: true, es2020: true },
+              rules: {}
+          };
+          eslint.getRules().forEach((desc, name) => {
+              var _a;
+              if ((_a = desc.meta.docs) === null || _a === void 0 ? void 0 : _a.recommended)
+                  config.rules[name] = 2;
+          });
+      }
+      return (view) => {
+          let { state } = view, found = [];
+          for (let { from, to } of javascriptLanguage.findRegions(state)) {
+              let fromLine = state.doc.lineAt(from), offset = { line: fromLine.number - 1, col: from - fromLine.from, pos: from };
+              for (let d of eslint.verify(state.sliceDoc(from, to), config))
+                  found.push(translateDiagnostic(d, state.doc, offset));
+          }
+          return found;
+      };
+  }
+  function mapPos(line, col, doc, offset) {
+      return doc.line(line + offset.line).from + col + (line == 1 ? offset.col - 1 : -1);
+  }
+  function translateDiagnostic(input, doc, offset) {
+      let start = mapPos(input.line, input.column, doc, offset);
+      let result = {
+          from: start,
+          to: input.endLine != null && input.endColumn != 1 ? mapPos(input.endLine, input.endColumn, doc, offset) : start,
+          message: input.message,
+          source: input.ruleId ? "eslint:" + input.ruleId : "eslint",
+          severity: input.severity == 1 ? "warning" : "error",
+      };
+      if (input.fix) {
+          let { range, text } = input.fix, from = range[0] + offset.pos - start, to = range[1] + offset.pos - start;
+          result.actions = [{
+                  name: "fix",
+                  apply(view, start) {
+                      view.dispatch({ changes: { from: start + from, to: start + to, insert: text }, scrollIntoView: true });
+                  }
+              }];
+      }
+      return result;
+  }
+
+  var langJS = /*#__PURE__*/Object.freeze({
+    __proto__: null,
+    autoCloseTags: autoCloseTags,
+    completionPath: completionPath,
+    esLint: esLint,
+    javascript: javascript,
+    javascriptLanguage: javascriptLanguage,
+    jsxLanguage: jsxLanguage,
+    localCompletionSource: localCompletionSource,
+    scopeCompletionSource: scopeCompletionSource,
+    snippets: snippets,
+    tsxLanguage: tsxLanguage,
+    typescriptLanguage: typescriptLanguage,
+    typescriptSnippets: typescriptSnippets
   });
 
   const basicNormalize = typeof String.prototype.normalize == "function"
@@ -22666,7 +22817,7 @@
       cm: {
           state: cmState,
           view: cmView,
-          langJS: javascript,
+          langJS,
           search: cmSearch,
           lang: cmLang,
           cmds: cmCmds,
